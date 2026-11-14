@@ -1,0 +1,19 @@
+{
+  "name": "desktop-pet-player",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local desktop companion with selectable animation packs",
+  "main": "app/main.cjs",
+  "engines": {
+    "node": ">=22.15"
+  },
+  "scripts": {
+    "start": "electron .",
+    "build:win": "node scripts/build-windows.mjs",
+    "build:win:private": "node scripts/build-windows.mjs --private",
+    "smoke:win": "node scripts/windows-smoke.mjs"
+  },
+  "devDependencies": {
+    "electron": "45.3.2"
+  }
+}

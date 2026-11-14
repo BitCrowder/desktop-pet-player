@@ -1,0 +1,123 @@
+{
+  "version": 1,
+  "animations": {
+    "idle": {
+      "file": "idle.webp",
+      "frameWidth": 160,
+      "frameHeight": 160,
+      "columns": 3,
+      "frameDurationsMs": [
+        720,
+        105,
+        130,
+        690
+      ],
+      "loop": true
+    },
+    "act-cute": {
+      "file": "act-cute.webp",
+      "frameWidth": 160,
+      "frameHeight": 160,
+      "columns": 3,
+      "frameDurationsMs": [
+        100,
+        130,
+        130,
+        500,
+        200,
+        130
+      ],
+      "loop": false
+    },
+    "glide": {
+      "file": "glide.webp",
+      "frameWidth": 160,
+      "frameHeight": 160,
+      "columns": 3,
+      "frameDurationsMs": [
+        160,
+        140,
+        180,
+        330,
+        180,
+        140
+      ],
+      "loop": false
+    },
+    "tail-nap": {
+      "file": "tail-nap.webp",
+      "frameWidth": 160,
+      "frameHeight": 160,
+      "columns": 3,
+      "frameDurationsMs": [
+        270,
+        300,
+        380,
+        300,
+        245,
+        420
+      ],
+      "loop": true
+    },
+    "snack": {
+      "file": "snack.webp",
+      "frameWidth": 160,
+      "frameHeight": 160,
+      "columns": 3,
+      "frameDurationsMs": [
+        210,
+        150,
+        220,
+        150,
+        220,
+        360
+      ],
+      "loop": false
+    },
+    "tantrum-roll": {
+      "file": "tantrum-roll.webp",
+      "frameWidth": 160,
+      "frameHeight": 160,
+      "columns": 3,
+      "frameDurationsMs": [
+        200,
+        140,
+        150,
+        250,
+        150,
+        270
+      ],
+      "loop": false
+    },
+    "sneaky-peek": {
+      "file": "sneaky-peek.webp",
+      "frameWidth": 160,
+      "frameHeight": 160,
+      "columns": 3,
+      "frameDurationsMs": [
+        210,
+        180,
+        520,
+        180,
+        150,
+        230
+      ],
+      "loop": false
+    },
+    "tiny-steps": {
+      "file": "tiny-steps.webp",
+      "frameWidth": 160,
+      "frameHeight": 160,
+      "columns": 3,
+      "frameDurationsMs": [
+        110,
+        95,
+        95,
+        110,
+        95,
+        95
+      ],
+      "loop": true
+    }
+  }
+}

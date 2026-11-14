@@ -1,0 +1,6 @@
+node_modules/
+dist/
+private-assets/
+tools/prepare-assets.py
+.DS_Store
+*.log
