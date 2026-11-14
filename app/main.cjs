@@ -19,7 +19,12 @@ const profile = smokePath ? path.join(path.dirname(smokePath), 'smoke-profile') 
 app.setName(localBrand ? '飞鼠桌宠' : 'Desktop Pet Player');
 mkdirSync(profile, { recursive: true });
 app.setPath('userData', profile);
-if (process.platform === 'win32') app.setAppUserModelId(localBrand ? 'BitCrowder.MomongaDesktopPet' : 'BitCrowder.DesktopPetPlayer');
+if (process.platform === 'win32') {
+  // A small sprite canvas works in software and avoids driver-specific
+  // problems with transparent overlay windows and their shutdown.
+  app.disableHardwareAcceleration();
+  app.setAppUserModelId(localBrand ? 'BitCrowder.MomongaDesktopPet' : 'BitCrowder.DesktopPetPlayer');
+}
 if (process.platform === 'darwin') app.dock?.hide();
 
 const actions = {
@@ -301,7 +306,7 @@ async function finishSmoke(error, hashes = {}) {
   }
   trace('write result: ' + (error || 'success'));
   await fs.writeFile(smokePath, JSON.stringify({ ok: !error, error, pack: localBrand ? 'local' : 'demo',
-    animations: Object.keys(hashes), checks }, null, 2));
+    animations: Object.keys(hashes), checks, pid: process.pid }, null, 2));
   trace('exit requested');
   app.quit();
 }
