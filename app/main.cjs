@@ -1,6 +1,6 @@
 const { app, BrowserWindow, Menu, Tray, screen, ipcMain, dialog, nativeImage, session } = require('electron');
 const fs = require('node:fs/promises');
-const { appendFileSync } = require('node:fs');
+const { appendFileSync, mkdirSync } = require('node:fs');
 const path = require('node:path');
 const { readPack } = require('./packs.cjs');
 
@@ -17,6 +17,7 @@ const localBrand = path.basename(process.execPath, path.extname(process.execPath
 const appFolder = localBrand ? 'MomongaDesktopPet' : 'DesktopPetPlayer';
 const profile = smokePath ? path.join(path.dirname(smokePath), 'smoke-profile') : path.join(app.getPath('appData'), appFolder);
 app.setName(localBrand ? '飞鼠桌宠' : 'Desktop Pet Player');
+mkdirSync(profile, { recursive: true });
 app.setPath('userData', profile);
 if (process.platform === 'win32') app.setAppUserModelId(localBrand ? 'BitCrowder.MomongaDesktopPet' : 'BitCrowder.DesktopPetPlayer');
 if (process.platform === 'darwin') app.dock?.hide();
@@ -306,7 +307,6 @@ async function finishSmoke(error, hashes = {}) {
 
 async function launch() {
   trace('app ready');
-  await fs.mkdir(profile, { recursive: true });
   try {
     const raw = JSON.parse(await fs.readFile(path.join(profile, 'settings.json'), 'utf8'));
     settings = { ...defaults, ...raw };
