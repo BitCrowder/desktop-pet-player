@@ -14,6 +14,6 @@
     "smoke:win": "node scripts/windows-smoke.mjs"
   },
   "devDependencies": {
-    "electron": "44.11.3"
+    "electron": "45.3.2"
   }
 }

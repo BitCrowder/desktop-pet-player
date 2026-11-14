@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { access, copyFile, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { release, tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,31 +57,15 @@ async function assertWindowsX64(executable) {
   }
 }
 
-const evidence = { installer: filename, windowsRelease: release(), architecture: process.arch, phases: [], ok: false };
-const evidenceFile = path.join(outputDir, 'smoke-results.json');
-await mkdir(outputDir, { recursive: true });
+const expectedHash = (await readFile(`${installer}.sha256`, 'utf8')).split(/\s+/u)[0];
+const digest = createHash('sha256');
+for await (const chunk of createReadStream(installer)) digest.update(chunk);
+assert.equal(digest.digest('hex'), expectedHash, 'Installer checksum does not match the built installer.');
+assert.equal(await exists(installedDir), false, 'The test requires a clean Windows installation of this app.');
+
 const fixtures = await mkdtemp(path.join(tmpdir(), 'desktop-pet-smoke-'));
-const resultFile = path.join(fixtures, 'renderer-result.json');
-const chromiumLog = path.join(fixtures, 'chromium.log');
-
-async function phase(name) {
-  evidence.phases.push(name);
-  console.log(name);
-  await writeFile(evidenceFile, JSON.stringify(evidence, null, 2) + '\n');
-}
-
 try {
-  await phase('verify-installer-sha256');
-  const expectedHash = (await readFile(`${installer}.sha256`, 'utf8')).split(/\s+/u)[0];
-  const digest = createHash('sha256');
-  for await (const chunk of createReadStream(installer)) digest.update(chunk);
-  evidence.sha256 = digest.digest('hex');
-  assert.equal(evidence.sha256, expectedHash, 'Installer checksum does not match the built installer.');
-  assert.equal(await exists(installedDir), false, 'The test requires a clean Windows installation of this app.');
-
-  await phase('install-silently');
   await run(installer, ['/S']);
-  await phase('verify-installed-executable-and-animation-pack');
   assert.equal(await exists(installedExe), true, 'NSIS did not install the Windows executable.');
   assert.equal(await exists(uninstaller), true, 'NSIS did not install the uninstaller.');
   await assertWindowsX64(installedExe);
@@ -94,15 +78,21 @@ try {
     assert.deepEqual(await readFile(path.join(installedPack, file)), await readFile(path.join(sourcePack, file)),
       `The installed animation ${file} does not match the selected asset pack.`);
   }
-  await phase('run-installed-desktop-app');
-  await run(installedExe, [`--smoke-file=${resultFile}`, '--enable-logging=file', `--log-file=${chromiumLog}`], {
-    cwd: installedDir,
-    stdio: 'ignore',
-    env: { ...process.env, ELECTRON_NO_ATTACH_CONSOLE: '1' },
-  });
-  await phase('verify-desktop-app-result');
+  const resultFile = path.join(fixtures, 'renderer-result.json');
+  const chromiumLog = path.join(fixtures, 'chromium.log');
+  try {
+    console.log('Launching the installed Windows x64 app with the verified animation pack.');
+    await run(installedExe, [`--smoke-file=${resultFile}`, '--enable-logging=file', `--log-file=${chromiumLog}`]);
+  } catch (error) {
+    for (const diagnostic of [resultFile, `${resultFile}.trace`, chromiumLog]) {
+      if (await exists(diagnostic)) {
+        const log = await readFile(diagnostic, 'utf8');
+        console.error(`--- ${path.basename(diagnostic)} ---\n${log.slice(-30_000)}`);
+      }
+    }
+    throw error;
+  }
   const result = JSON.parse(await readFile(resultFile, 'utf8'));
-  evidence.result = result;
   assert.equal(result.ok, true, 'The installed renderer did not complete its checks.');
   assert.equal(result.pack, personal ? 'local' : 'demo', 'The installed app loaded the wrong animation pack.');
   assert.deepEqual(result.animations.slice().sort(), Object.keys(JSON.parse(manifest).animations).sort(),
@@ -111,28 +101,15 @@ try {
     assert.ok(result.checks.includes(check), `The installed renderer did not confirm ${check}.`);
   }
 
-  await phase('uninstall');
   // Run a copy so the uninstaller can remove its original executable synchronously.
   const testUninstaller = path.join(fixtures, 'Uninstall.exe');
   await copyFile(uninstaller, testUninstaller);
   await run(testUninstaller, ['/S', `_?=${installedDir}`], { windowsVerbatimArguments: true });
   assert.equal(await exists(installedExe), false, 'The uninstaller left the app executable installed.');
   assert.equal(await exists(uninstaller), false, 'The uninstaller left its installed executable behind.');
-  evidence.ok = true;
+  const evidence = { installer: filename, sha256: expectedHash, windowsRelease: release(), architecture: process.arch, result };
+  await writeFile(path.join(outputDir, 'smoke-results.json'), JSON.stringify(evidence, null, 2) + '\n');
   console.log(evidence);
-} catch (error) {
-  evidence.failure = error.message;
-  const diagnostics = path.join(outputDir, 'smoke-diagnostics');
-  await mkdir(diagnostics, { recursive: true });
-  for (const filename of [resultFile, `${resultFile}.trace`, chromiumLog]) {
-    if (await exists(filename)) {
-      await copyFile(filename, path.join(diagnostics, path.basename(filename)));
-      const log = await readFile(filename, 'utf8');
-      console.error(`--- ${path.basename(filename)} ---\n${log.slice(-30_000)}`);
-    }
-  }
-  throw error;
 } finally {
-  await writeFile(evidenceFile, JSON.stringify(evidence, null, 2) + '\n');
   await rm(fixtures, { recursive: true, force: true });
 }

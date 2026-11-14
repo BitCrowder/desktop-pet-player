@@ -9,11 +9,7 @@ permissions:
 
 jobs:
   windows-x64:
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [windows-2025, windows-2022]
-    runs-on: ${{ matrix.runner }}
+    runs-on: windows-2025
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
@@ -45,17 +41,9 @@ jobs:
         run: npm run smoke:win
       - uses: actions/upload-artifact@v4
         with:
-          name: desktop-pet-player-windows-x64-${{ matrix.runner }}
+          name: desktop-pet-player-windows-x64
           path: |
             dist/windows/public/DesktopPetPlayer-Setup-*-x64.exe
             dist/windows/public/DesktopPetPlayer-Setup-*-x64.exe.sha256
             dist/windows/public/smoke-results.json
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: desktop-pet-player-windows-diagnostics-${{ matrix.runner }}
-          path: |
-            dist/windows/public/smoke-results.json
-            dist/windows/public/smoke-diagnostics/
-          if-no-files-found: ignore
