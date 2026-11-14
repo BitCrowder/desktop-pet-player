@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const appPackage = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
-const electronVersion = '45.3.2';
-const electronZipHash = 'cd1ab0d49c2f76838c0c9ff75afefb4d9d85ca59036691932bf35be8eceba98b';
+const electronVersion = '44.11.3';
+const electronZipHash = '97fca9b8e9b90cdc88c1efd44160ca4b89b15101721d93c8befcbeb35b93fb59';
 const electronZipName = `electron-v${electronVersion}-win32-x64.zip`;
 const electronUrl = `https://github.com/electron/electron/releases/download/v${electronVersion}/${electronZipName}`;
 
