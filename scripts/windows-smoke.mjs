@@ -95,9 +95,7 @@ try {
       `The installed animation ${file} does not match the selected asset pack.`);
   }
   await phase('run-installed-desktop-app');
-  await run(installedExe, [`--smoke-file=${resultFile}`, '--enable-logging=file', `--log-file=${chromiumLog}`], {
-    env: { ...process.env, DESKTOP_PET_SMOKE_FILE: resultFile, ELECTRON_ENABLE_LOGGING: '1', ELECTRON_LOG_FILE: chromiumLog },
-  });
+  await run(installedExe, [`--smoke-file=${resultFile}`, '--enable-logging=file', `--log-file=${chromiumLog}`]);
   await phase('verify-desktop-app-result');
   const result = JSON.parse(await readFile(resultFile, 'utf8'));
   evidence.result = result;
