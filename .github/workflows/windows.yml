@@ -47,3 +47,11 @@ jobs:
             dist/windows/public/DesktopPetPlayer-Setup-*-x64.exe.sha256
             dist/windows/public/smoke-results.json
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: desktop-pet-player-windows-diagnostics
+          path: |
+            dist/windows/public/smoke-results.json
+            dist/windows/public/smoke-diagnostics/
+          if-no-files-found: ignore
