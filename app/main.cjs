@@ -1,11 +1,17 @@
 const { app, BrowserWindow, Menu, Tray, screen, ipcMain, dialog, nativeImage, session } = require('electron');
 const fs = require('node:fs/promises');
+const { appendFileSync } = require('node:fs');
 const path = require('node:path');
 const { readPack } = require('./packs.cjs');
 
 const bundled = app.isPackaged ? path.join(process.resourcesPath, 'pet-pack') :
   path.join(__dirname, '..', process.env.PET_LOCAL_ART === '1' ? 'private-assets/pet-pack' : 'demo-pack');
-const smokePath = process.argv.find(arg => arg.startsWith('--smoke-file='))?.slice('--smoke-file='.length);
+const smokePath = process.env.DESKTOP_PET_SMOKE_FILE ||
+  process.argv.find(arg => arg.startsWith('--smoke-file='))?.slice('--smoke-file='.length);
+function trace(phase) {
+  if (smokePath) appendFileSync(smokePath + '.trace', new Date().toISOString() + ' ' + phase + '\n');
+}
+trace('main script');
 const localBrand = path.basename(process.execPath, path.extname(process.execPath)) === 'MomongaDesktopPet' ||
   (!app.isPackaged && process.env.PET_LOCAL_ART === '1');
 const appFolder = localBrand ? 'MomongaDesktopPet' : 'DesktopPetPlayer';
@@ -274,6 +280,8 @@ function bind(name, handler) {
 
 async function finishSmoke(error, hashes = {}) {
   const checks = [];
+  trace('smoke finish: ' + (error || 'renderer succeeded'));
+  try {
   if (!error) {
     for (const id of Object.keys(actions)) {
       play(id);
@@ -289,12 +297,15 @@ async function finishSmoke(error, hashes = {}) {
     }
     checks.push('offline-pack-decode', 'alpha-in-every-frame', 'distinct-animation-frames', 'all-menu-actions', 'window-show-hide');
   }
+  } catch (failure) { error = failure.message; }
+  trace('write result: ' + (error || 'success'));
   await fs.writeFile(smokePath, JSON.stringify({ ok: !error, error, pack: localBrand ? 'local' : 'demo',
     animations: Object.keys(hashes), checks }, null, 2));
   app.exit(error ? 1 : 0);
 }
 
 async function launch() {
+  trace('app ready');
   await fs.mkdir(profile, { recursive: true });
   try {
     const raw = JSON.parse(await fs.readFile(path.join(profile, 'settings.json'), 'utf8'));
@@ -305,6 +316,7 @@ async function launch() {
   } catch (error) {
     if (error.code !== 'ENOENT') console.error(error.message);
   }
+  trace('create window');
   win = new BrowserWindow({
     width: settings.size, height: settings.size, show: false, transparent: true,
     frame: false, hasShadow: false, resizable: false, movable: false,
@@ -360,7 +372,10 @@ async function launch() {
   bind('menu', popup);
   if (smokePath) bind('verified', ({ hashes, error }) => { void finishSmoke(error, hashes); });
 
+  trace('load window');
+  win.webContents.on('render-process-gone', (_event, details) => trace('renderer gone ' + details.reason));
   await win.loadFile(path.join(__dirname, 'index.html'));
+  trace('window loaded');
   if (typeof settings.customPack === 'string' && /^pack-[A-Za-z0-9]+$/.test(settings.customPack)) {
     try {
       const candidate = await readPack(path.join(profile, settings.customPack));
@@ -376,8 +391,11 @@ async function launch() {
     activePack = await readPack(bundled);
     await sendPack(activePack);
   }
+  trace('pack loaded');
   const icon = nativeImage.createFromPath(path.join(__dirname, 'tray.png')).resize({ width: 16, height: 16 });
+  trace('create tray');
   tray = new Tray(icon);
+  trace('tray created');
   tray.setToolTip(app.getName());
   const refreshTray = () => tray.setContextMenu(Menu.buildFromTemplate(menuItems()));
   tray.on('click', () => {
@@ -405,7 +423,10 @@ async function launch() {
     updateCursor(now);
     behaviors(now);
   }, 25).unref();
-  if (smokePath) win.webContents.send('pet:verify');
+  if (smokePath) {
+    trace('verify renderer');
+    win.webContents.send('pet:verify');
+  }
 }
 
 if (!smokePath && !app.requestSingleInstanceLock()) app.quit();
@@ -413,6 +434,7 @@ else {
   app.on('second-instance', () => { if (win && !win.isDestroyed()) showPet(); });
   app.on('window-all-closed', () => app.quit());
   app.whenReady().then(launch).catch(async error => {
+    trace('launch error ' + error.stack);
     if (smokePath) await finishSmoke(error.message);
     else {
       dialog.showErrorBox('桌宠启动失败', error.message);

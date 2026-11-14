@@ -79,7 +79,19 @@ try {
       `The installed animation ${file} does not match the selected asset pack.`);
   }
   const resultFile = path.join(fixtures, 'renderer-result.json');
-  await run(installedExe, [`--smoke-file=${resultFile}`]);
+  const chromiumLog = path.join(fixtures, 'chromium.log');
+  try {
+    console.log('Launching the installed Windows x64 app with the verified animation pack.');
+    await run(installedExe, [`--smoke-file=${resultFile}`, '--enable-logging=file', `--log-file=${chromiumLog}`]);
+  } catch (error) {
+    for (const diagnostic of [resultFile, `${resultFile}.trace`, chromiumLog]) {
+      if (await exists(diagnostic)) {
+        const log = await readFile(diagnostic, 'utf8');
+        console.error(`--- ${path.basename(diagnostic)} ---\n${log.slice(-30_000)}`);
+      }
+    }
+    throw error;
+  }
   const result = JSON.parse(await readFile(resultFile, 'utf8'));
   assert.equal(result.ok, true, 'The installed renderer did not complete its checks.');
   assert.equal(result.pack, personal ? 'local' : 'demo', 'The installed app loaded the wrong animation pack.');
