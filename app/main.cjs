@@ -283,26 +283,27 @@ async function finishSmoke(error, hashes = {}) {
   const checks = [];
   trace('smoke finish: ' + (error || 'renderer succeeded'));
   try {
-  if (!error) {
-    for (const id of Object.keys(actions)) {
-      play(id);
-      if (current !== id) error = `未能切换动作 ${id}`;
-    }
-    play('idle');
-    if (!win.isVisible() || !win.isAlwaysOnTop()) error = '悬浮窗未正常显示';
-    else {
+    if (!error) {
+      for (const id of Object.keys(actions)) {
+        play(id);
+        if (current !== id) throw Error(`未能切换动作 ${id}`);
+      }
+      play('idle');
+      if (!win.isVisible() || !win.isAlwaysOnTop()) throw Error('悬浮窗未正常显示');
       win.hide();
-      if (win.isVisible()) error = '无法隐藏桌宠';
+      if (win.isVisible()) throw Error('无法隐藏桌宠');
       showPet();
-      if (!win.isVisible()) error = '无法恢复桌宠';
+      if (!win.isVisible()) throw Error('无法恢复桌宠');
+      checks.push('offline-pack-decode', 'alpha-in-every-frame', 'distinct-animation-frames', 'all-menu-actions', 'window-show-hide');
     }
-    checks.push('offline-pack-decode', 'alpha-in-every-frame', 'distinct-animation-frames', 'all-menu-actions', 'window-show-hide');
+  } catch (failure) {
+    error = failure.message;
   }
-  } catch (failure) { error = failure.message; }
   trace('write result: ' + (error || 'success'));
   await fs.writeFile(smokePath, JSON.stringify({ ok: !error, error, pack: localBrand ? 'local' : 'demo',
     animations: Object.keys(hashes), checks }, null, 2));
-  app.exit(error ? 1 : 0);
+  trace('exit requested');
+  app.quit();
 }
 
 async function launch() {
@@ -397,7 +398,9 @@ async function launch() {
   tray = new Tray(icon);
   trace('tray created');
   tray.setToolTip(app.getName());
-  const refreshTray = () => tray.setContextMenu(Menu.buildFromTemplate(menuItems()));
+  const refreshTray = () => {
+    if (!tray.isDestroyed()) tray.setContextMenu(Menu.buildFromTemplate(menuItems()));
+  };
   tray.on('click', () => {
     if (process.platform === 'darwin') popup();
     else {
@@ -431,6 +434,12 @@ async function launch() {
 
 if (!smokePath && !app.requestSingleInstanceLock()) app.quit();
 else {
+  app.on('before-quit', () => {
+    trace('before quit');
+    if (tray && !tray.isDestroyed()) tray.destroy();
+  });
+  app.on('will-quit', () => trace('will quit'));
+  app.on('quit', () => trace('quit'));
   app.on('second-instance', () => { if (win && !win.isDestroyed()) showPet(); });
   app.on('window-all-closed', () => app.quit());
   app.whenReady().then(launch).catch(async error => {
