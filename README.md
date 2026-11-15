@@ -6,7 +6,11 @@
 
 Windows x64 用户可从 [Releases](https://github.com/BitCrowder/desktop-pet-player/releases) 下载 `DesktopPetPlayer-Setup-…-x64.exe`。双击安装，完成后从开始菜单打开 **Desktop Pet Player**。安装按当前用户进行，完成页保留「Launch Desktop Pet Player」勾选即可立即运行，无需另外安装 Node.js。
 
-初次安装时，Windows 可能会提示发布者未知。发行页提供 SHA-256 校验文件，可用 PowerShell 的 `Get-FileHash .\DesktopPetPlayer-Setup-1.0.0-x64.exe -Algorithm SHA256` 核对。Windows 32 位系统不在支持范围内。
+### 从 1.0.0 升级
+
+先在桌宠或托盘菜单点「退出」，再双击新版安装包覆盖安装。已导入的角色、大小、位置和「自由活动」设置会继续使用。新版按原比例绘制图集，滑翔和散步结束后恢复待机。自定义图集本身的画面内容取决于角色包。
+
+初次安装时，Windows 可能会提示发布者未知。发行页提供 SHA-256 校验文件，可用 PowerShell 的 `Get-FileHash .\DesktopPetPlayer-Setup-1.1.0-x64.exe -Algorithm SHA256` 核对。Windows 32 位系统不在支持范围内。
 
 ## 桌面操作
 

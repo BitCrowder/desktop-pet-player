@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
-import { access, copyFile, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { access, cp, copyFile, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
 import { release, tmpdir } from 'node:os';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 
 assert.equal(process.platform, 'win32', 'The installer check must run on Windows.');
 const root = fileURLToPath(new URL('..', import.meta.url));
 const { version } = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 const personal = process.argv.includes('--private');
+const upgrade = process.argv.includes('--upgrade-from-v1');
+assert.ok(!upgrade || (!personal && version !== '1.0.0'), 'Upgrade verification requires a newer public build.');
 const mode = personal ? 'private' : 'public';
 const appId = personal ? 'MomongaDesktopPet' : 'DesktopPetPlayer';
 const outputDir = path.join(root, 'dist', 'windows', mode);
@@ -19,6 +22,10 @@ const installer = path.join(outputDir, filename);
 const installedDir = path.join(process.env.LOCALAPPDATA, 'Programs', appId);
 const installedExe = path.join(installedDir, `${appId}.exe`);
 const uninstaller = path.join(installedDir, 'Uninstall.exe');
+const profile = path.join(process.env.APPDATA, appId);
+const previousInstallerUrl = 'https://github.com/BitCrowder/desktop-pet-player/releases/download/v1.0.0/DesktopPetPlayer-Setup-1.0.0-x64.exe';
+const previousInstallerSha = '109992949986a1eab2f2ba6e79e1c49c4bcabbd4b0d116bd729b6dbfc44625db';
+let ownsTestProfile = false;
 
 async function exists(filename) {
   try {
@@ -57,18 +64,67 @@ async function assertWindowsX64(executable) {
   }
 }
 
+async function sha256(filename) {
+  const digest = createHash('sha256');
+  for await (const chunk of createReadStream(filename)) digest.update(chunk);
+  return digest.digest('hex');
+}
+
+async function installedVersion() {
+  return JSON.parse(await readFile(path.join(installedDir, 'resources', 'app', 'package.json'), 'utf8')).version;
+}
+
+async function setUpPreviousVersion(fixtures) {
+  assert.equal(await exists(profile), false, 'The upgrade check requires a clean Windows user profile.');
+  console.log('Downloading and installing the released v1.0.0 package.');
+  const previousInstaller = path.join(fixtures, 'previous-setup.exe');
+  const response = await fetch(previousInstallerUrl, { signal: AbortSignal.timeout(180_000) });
+  assert.ok(response.ok && response.body, `Could not download the public v1.0.0 installer: HTTP ${response.status}.`);
+  await pipeline(response.body, createWriteStream(previousInstaller));
+  assert.equal(await sha256(previousInstaller), previousInstallerSha, 'The downloaded v1.0.0 installer checksum does not match.');
+  await run(previousInstaller, ['/S']);
+  assert.equal(await installedVersion(), '1.0.0');
+
+  // Recreate the files written by v1.0.0 character import. The fixture is the
+  // previous public release's own demo pack. It contains only public artwork.
+  const customPack = 'pack-ciUpgrade';
+  const installedPack = path.join(installedDir, 'resources', 'pet-pack');
+  const fixturePack = path.join(profile, customPack);
+  const settings = { size: 224, top: true, roam: false, position: { x: 64, y: 64 }, customPack };
+  await mkdir(profile);
+  ownsTestProfile = true;
+  await cp(installedPack, fixturePack, { recursive: true });
+  const settingBytes = JSON.stringify(settings);
+  await writeFile(path.join(profile, 'settings.json'), settingBytes);
+  const manifest = JSON.parse(await readFile(path.join(fixturePack, 'manifest.json'), 'utf8'));
+  const tracks = ['manifest.json', ...new Set(Object.values(manifest.animations).map(({ file }) => file))];
+  const before = await Promise.all(tracks.map(file => sha256(path.join(fixturePack, file))));
+
+  return {
+    settings,
+    async assertPreserved() {
+      assert.equal(await readFile(path.join(profile, 'settings.json'), 'utf8'), settingBytes,
+        'Windows upgrade changed the saved settings.');
+      const after = await Promise.all(tracks.map(file => sha256(path.join(fixturePack, file))));
+      assert.deepEqual(after, before, 'Windows upgrade changed the imported animation pack.');
+    },
+  };
+}
+
 const expectedHash = (await readFile(`${installer}.sha256`, 'utf8')).split(/\s+/u)[0];
-const digest = createHash('sha256');
-for await (const chunk of createReadStream(installer)) digest.update(chunk);
-assert.equal(digest.digest('hex'), expectedHash, 'Installer checksum does not match the built installer.');
+assert.equal(await sha256(installer), expectedHash, 'Installer checksum does not match the built installer.');
 assert.equal(await exists(installedDir), false, 'The test requires a clean Windows installation of this app.');
 
 const fixtures = await mkdtemp(path.join(tmpdir(), 'desktop-pet-smoke-'));
 try {
+  const prior = upgrade ? await setUpPreviousVersion(fixtures) : null;
+  console.log(prior ? 'Installing the new version over v1.0.0.' : 'Installing the new version.');
   await run(installer, ['/S']);
   assert.equal(await exists(installedExe), true, 'NSIS did not install the Windows executable.');
   assert.equal(await exists(uninstaller), true, 'NSIS did not install the uninstaller.');
+  assert.equal(await installedVersion(), version, 'The new version was not installed.');
   await assertWindowsX64(installedExe);
+  if (prior) await prior.assertPreserved();
 
   const sourcePack = path.join(root, personal ? 'private-assets/pet-pack' : 'demo-pack');
   const installedPack = path.join(installedDir, 'resources', 'pet-pack');
@@ -82,7 +138,9 @@ try {
   const chromiumLog = path.join(fixtures, 'chromium.log');
   try {
     console.log('Launching the installed Windows x64 app with the verified animation pack.');
-    await run(installedExe, [`--smoke-file=${resultFile}`, '--enable-logging=file', `--log-file=${chromiumLog}`]);
+    const smokeArgs = [`--smoke-file=${resultFile}`, '--enable-logging=file', `--log-file=${chromiumLog}`];
+    if (prior) smokeArgs.push(`--smoke-profile=${profile}`);
+    await run(installedExe, smokeArgs);
   } catch (error) {
     for (const diagnostic of [resultFile, `${resultFile}.trace`, chromiumLog]) {
       if (await exists(diagnostic)) {
@@ -94,10 +152,18 @@ try {
   }
   const result = JSON.parse(await readFile(resultFile, 'utf8'));
   assert.equal(result.ok, true, 'The installed renderer did not complete its checks.');
-  assert.equal(result.pack, personal ? 'local' : 'demo', 'The installed app loaded the wrong animation pack.');
+  if (prior) {
+    assert.equal(result.customPack, prior.settings.customPack, 'The upgraded app did not load the saved custom pack.');
+    assert.equal(result.size, prior.settings.size, 'The upgraded app did not restore the saved pet size.');
+  } else {
+    assert.equal(result.pack, personal ? 'local' : 'demo', 'The installed app loaded the wrong animation pack.');
+  }
   assert.deepEqual(result.animations.slice().sort(), Object.keys(JSON.parse(manifest).animations).sort(),
     'The installed renderer did not load all animations.');
-  for (const check of ['offline-pack-decode', 'alpha-in-every-frame', 'distinct-animation-frames', 'all-menu-actions', 'window-show-hide']) {
+  const requiredChecks = ['offline-pack-decode', 'alpha-in-every-frame', 'distinct-animation-frames',
+    'all-menu-actions', 'window-show-hide', 'fixed-aspect-and-canvas', 'motion-lands-before-idle',
+    'all-actions-return-to-idle', 'run-cycle-completes', 'roaming-toggle'];
+  for (const check of requiredChecks) {
     assert.ok(result.checks.includes(check), `The installed renderer did not confirm ${check}.`);
   }
 
@@ -107,9 +173,11 @@ try {
   await run(testUninstaller, ['/S', `_?=${installedDir}`], { windowsVerbatimArguments: true });
   assert.equal(await exists(installedExe), false, 'The uninstaller left the app executable installed.');
   assert.equal(await exists(uninstaller), false, 'The uninstaller left its installed executable behind.');
-  const evidence = { installer: filename, sha256: expectedHash, windowsRelease: release(), architecture: process.arch, result };
+  const evidence = { installer: filename, sha256: expectedHash, windowsRelease: release(), architecture: process.arch,
+    ...(prior && { upgradedFrom: '1.0.0', existingSettingsAndPackPreserved: true }), result };
   await writeFile(path.join(outputDir, 'smoke-results.json'), JSON.stringify(evidence, null, 2) + '\n');
   console.log(evidence);
 } finally {
-  await rm(fixtures, { recursive: true, force: true });
+  if (ownsTestProfile) await rm(profile, { recursive: true, force: true, maxRetries: 3 });
+  await rm(fixtures, { recursive: true, force: true, maxRetries: 3 });
 }

@@ -7,9 +7,11 @@ let hit = false;
 let previousHit = false;
 let lastDraw = '';
 let loadId = 0;
+let artAspectRatioPreserved = false;
 
 function render(id, index, flip = false) {
   const item = pack[id];
+  flip &&= !item.unflippedFrames?.includes(index);
   const key = [id, index, flip].join(':');
   if (lastDraw === key) return;
   lastDraw = key;
@@ -21,7 +23,9 @@ function render(id, index, flip = false) {
     ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
   }
-  ctx.drawImage(item.image, x, y, item.frameWidth, item.frameHeight, 0, 0, canvas.width, canvas.height);
+  const target = fitFrame(item.frameWidth, item.frameHeight, canvas.width, canvas.height);
+  artAspectRatioPreserved = Math.abs(target.w * item.frameHeight - target.h * item.frameWidth) < 0.01;
+  ctx.drawImage(item.image, x, y, item.frameWidth, item.frameHeight, target.x, target.y, target.w, target.h);
   ctx.restore();
   checkCursor();
 }
@@ -36,27 +40,21 @@ function checkCursor() {
   }
 }
 
-function start({ id, flip = false, repeat = pack?.[id]?.loop === true && (id === 'idle' || id === 'tail-nap') }) {
+function start({ id, flip = false, repeatFrames = false, duration = null, startedAt = Date.now() }) {
   if (!pack?.[id]) return;
-  const duration = pack[id].frameDurationsMs.reduce((total, delay) => total + delay, 0);
-  playing = { id, flip, repeat, duration, start: performance.now() };
-  render(id, 0, flip);
+  playing = { id, flip, repeatFrames, startedAt, duration };
+  paintAt(Date.now());
 }
 
-function tick(now) {
-  if (playing) {
-    const { id, start: started, flip, repeat, duration } = playing;
-    const delays = pack[id].frameDurationsMs;
-    let remaining = now - started;
-    if (!repeat && remaining >= duration) {
-      window.pet.send('ended', id);
-      start({ id: 'idle' });
-    } else {
-      remaining %= duration;
-      const frame = delays.findIndex(delay => (remaining -= delay) < 0);
-      render(id, Math.max(0, frame), flip);
-    }
-  }
+function paintAt(now) {
+  if (!playing) return;
+  const { id, flip, repeatFrames, duration, startedAt } = playing;
+  const elapsed = duration === null ? now - startedAt : Math.min(now - startedAt, duration - 1);
+  render(id, animationFrame(pack[id], elapsed, repeatFrames), flip);
+}
+
+function tick() {
+  paintAt(Date.now());
   requestAnimationFrame(tick);
 }
 
@@ -70,12 +68,13 @@ window.pet.on('pack', async ({ animations, token }) => {
       if (image.width !== item.columns * item.frameWidth ||
           image.height < Math.ceil(item.frameDurationsMs.length / item.columns) * item.frameHeight ||
           image.height % item.frameHeight !== 0) throw Error(`图集尺寸不符：${id}`);
-      return [id, { ...item, image }];
+      const cycle = item.frameDurationsMs.reduce((sum, delay) => sum + delay, 0);
+      return [id, { ...item, image, cycle }];
     }));
     if (current !== loadId) return;
     pack = Object.fromEntries(entries);
     lastDraw = '';
-    start({ id: 'idle' });
+    start({ id: 'idle', repeatFrames: pack.idle.loop });
     window.pet.send('loaded', { token });
   } catch (error) {
     if (current === loadId) window.pet.send('loaded', { token, error: error.message });
@@ -102,6 +101,13 @@ canvas.addEventListener('contextmenu', event => {
   window.pet.send('menu');
 });
 
+window.pet.on('sample', ({ now, token }) => {
+  paintAt(now);
+  const [id, frame] = lastDraw.split(':');
+  window.pet.send('sampled', { token, id, frame: Number(frame),
+    aspectRatioPreserved: artAspectRatioPreserved, square: canvas.width === canvas.height && canvas.offsetWidth === canvas.offsetHeight });
+});
+
 window.pet.on('verify', () => {
   try {
     const hashes = {};
@@ -124,7 +130,7 @@ window.pet.on('verify', () => {
       if (observed.size < 2) throw Error(`没有动画变化：${id}`);
       hashes[id] = observed.size;
     }
-    start({ id: 'idle' });
+    start({ id: 'idle', repeatFrames: pack.idle.loop });
     window.pet.send('verified', { hashes });
   } catch (error) {
     window.pet.send('verified', { error: error.message });

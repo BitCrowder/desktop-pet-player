@@ -44,6 +44,20 @@ Function un.onInit
 FunctionEnd
 
 Section "Install"
+  ; Check the old executable before extracting any files. Keep the current
+  ; installation intact if the previous desktop pet is still running.
+  check_running:
+    IfFileExists "$INSTDIR\${APP_ID}.exe" 0 write_files
+    ClearErrors
+    FileOpen $0 "$INSTDIR\${APP_ID}.exe" a
+    IfErrors app_in_use
+    FileClose $0
+    Goto write_files
+  app_in_use:
+    MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "请先在系统托盘菜单中退出 ${PRODUCT_NAME}，再点击 Retry（重试）。" /SD IDCANCEL IDRETRY check_running
+    SetErrorLevel 1
+    Quit
+  write_files:
   SetOutPath "$INSTDIR"
   File /r "${PAYLOAD_DIR}\*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"

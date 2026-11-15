@@ -17,20 +17,23 @@ const electronUrl = `https://github.com/electron/electron/releases/download/v${e
 if (appPackage.devDependencies.electron !== electronVersion) {
   throw new Error('Update the pinned Windows Electron archive and its SHA256 alongside the Electron dependency.');
 }
-if (process.argv.slice(2).some((argument) => argument !== '--private')) {
-  throw new Error('Usage: node scripts/build-windows.mjs [--private]');
+if (process.argv.slice(2).some((argument) => !['--private', '--pet-upgrade'].includes(argument))) {
+  throw new Error('Usage: node scripts/build-windows.mjs [--private | --pet-upgrade]');
 }
 
 const personal = process.argv.includes('--private');
-if (personal && process.env.CI) {
+const petUpgrade = process.argv.includes('--pet-upgrade');
+if (personal && petUpgrade) throw Error('Choose one local installer type.');
+if ((personal || petUpgrade) && process.env.CI) {
   throw new Error('Personal artwork can only be packaged locally.');
 }
-const mode = personal ? 'private' : 'public';
+const mode = personal || petUpgrade ? 'private' : 'public';
 const appId = personal ? 'MomongaDesktopPet' : 'DesktopPetPlayer';
 const productName = personal ? 'Momonga Desktop Pet' : 'Desktop Pet Player';
-const packSource = path.join(root, personal ? 'private-assets/pet-pack' : 'demo-pack');
+const packSource = path.join(root, personal ? 'private-assets/pet-pack-v1.1' : 'demo-pack');
 const outputDir = path.join(root, 'dist', 'windows', mode);
-const filename = `${appId}-Setup-${appPackage.version}-x64.exe`;
+const filename = petUpgrade ? `${appId}-Momonga-Update-${appPackage.version}-x64.exe` :
+  `${appId}-Setup-${appPackage.version}-x64.exe`;
 const cacheDir = process.env.DESKTOP_PET_CACHE || path.join(homedir(), '.cache', 'desktop-pet-player');
 
 function run(command, args, options = {}) {
@@ -122,7 +125,13 @@ try {
   await copyTree(packSource, path.join(payload, 'resources', 'pet-pack'));
   await cp(path.join(root, 'LICENSE'), path.join(appDir, 'LICENSE'));
   await cp(path.join(root, 'ASSET-NOTICE.md'), path.join(appDir, 'ASSET-NOTICE.md'));
-  if (personal) {
+  if (petUpgrade) {
+    const upgrade = path.join(root, 'private-assets', 'pet-pack-v1.1');
+    const installedUpgrade = path.join(payload, 'resources', 'pet-upgrade');
+    await copyTree(upgrade, installedUpgrade);
+    await cp(path.join(root, 'private-assets', 'upgrade.json'), path.join(installedUpgrade, 'upgrade.json'));
+  }
+  if (personal || petUpgrade) {
     await cp(path.join(root, 'private-assets', 'INSTALL-ZH-CN.txt'), path.join(payload, 'INSTALL-ZH-CN.txt'));
   }
   await writeFile(path.join(appDir, 'package.json'), JSON.stringify({

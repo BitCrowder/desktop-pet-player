@@ -1,8 +1,10 @@
 const { app, BrowserWindow, Menu, Tray, screen, ipcMain, dialog, nativeImage, session } = require('electron');
 const fs = require('node:fs/promises');
 const { appendFileSync } = require('node:fs');
+const { createHash } = require('node:crypto');
 const path = require('node:path');
-const { readPack } = require('./packs.cjs');
+const { readPack, actions: packActions } = require('./packs.cjs');
+const { planPlayback } = require('./playback.js');
 
 const bundled = app.isPackaged ? path.join(process.resourcesPath, 'pet-pack') :
   path.join(__dirname, '..', process.env.PET_LOCAL_ART === '1' ? 'private-assets/pet-pack' : 'demo-pack');
@@ -15,7 +17,10 @@ trace('main script');
 const localBrand = path.basename(process.execPath, path.extname(process.execPath)) === 'MomongaDesktopPet' ||
   (!app.isPackaged && process.env.PET_LOCAL_ART === '1');
 const appFolder = localBrand ? 'MomongaDesktopPet' : 'DesktopPetPlayer';
-const profile = smokePath ? path.join(path.dirname(smokePath), 'smoke-profile') : path.join(app.getPath('appData'), appFolder);
+const smokeProfile = process.argv.find(arg => arg.startsWith('--smoke-profile='))?.slice('--smoke-profile='.length);
+const profile = smokePath ?
+  (smokeProfile && path.isAbsolute(smokeProfile) ? smokeProfile : path.join(path.dirname(smokePath), 'smoke-profile')) :
+  path.join(app.getPath('appData'), appFolder);
 app.setName(localBrand ? '飞鼠桌宠' : 'Desktop Pet Player');
 app.setPath('userData', profile);
 if (process.platform === 'win32') app.setAppUserModelId(localBrand ? 'BitCrowder.MomongaDesktopPet' : 'BitCrowder.DesktopPetPlayer');
@@ -49,8 +54,14 @@ let ignoring = true;
 let lastInput = Date.now();
 let lastCursor;
 let lastPeek = 0;
-let lastAuto = Date.now();
+let lastScreenCursor;
+let nextRoamAt = Date.now() + 30000;
+let nextPeekAt = Date.now() + 2000;
 let current = 'idle';
+let endsAt = null;
+let activeCustomPack = null;
+let sampleRequest;
+let sampleToken = 0;
 let writeQueue = Promise.resolve();
 
 function save() {
@@ -102,16 +113,6 @@ function updateCursor(now) {
         screen.getDisplayNearestPoint(cursor).workArea);
       if (target.x !== b.x || target.y !== b.y) win.setPosition(target.x, target.y);
     }
-  } else if (motion) {
-    const progress = Math.min(1, (now - motion.start) / motion.time);
-    const eased = motion.id === 'glide' ? progress * (2 - progress) : progress;
-    const next = clamp({ ...b, x: motion.x + motion.dx * eased,
-      y: motion.y - (motion.id === 'glide' ? 50 * Math.sin(Math.PI * progress) : 0) });
-    if (next.x !== b.x || next.y !== b.y) win.setPosition(next.x, next.y);
-    if (progress === 1) {
-      motion = null;
-      remember();
-    }
   }
   const bounds = win.getBounds();
   const local = { x: (cursor.x - bounds.x) / bounds.width, y: (cursor.y - bounds.y) / bounds.height };
@@ -119,49 +120,84 @@ function updateCursor(now) {
     lastCursor = local;
     win.webContents.send('pet:cursor', local);
     const nearby = local.x > -0.15 && local.x < 1.15 && local.y > -0.1 && local.y < 1.15;
-    if (nearby && !nearbyBefore) {
-      if (!pressed && !click && settings.roam && current === 'idle' && now - lastPeek > 18000) {
-        lastPeek = now;
-        play('sneaky-peek', { flip: local.x < 0.5 });
-      }
+    const cursorMoved = lastScreenCursor && (cursor.x !== lastScreenCursor.x || cursor.y !== lastScreenCursor.y);
+    if (nearby && !nearbyBefore && cursorMoved && !pressed && !click && settings.roam &&
+        current === 'idle' && now >= nextPeekAt && now - lastPeek > 18000) {
+      lastPeek = now;
+      play('sneaky-peek', { flip: local.x < 0.5, now });
     }
     nearbyBefore = nearby;
   }
+  lastScreenCursor = cursor;
 }
 
-function play(id, { flip = false } = {}) {
-  if (!activePack?.animations[id]) return;
+function play(id, { flip = false, now = Date.now() } = {}) {
+  const item = activePack?.animations[id];
+  if (!item) return;
+  const { duration, repeatFrames } = planPlayback(id, item);
   motion = null;
   current = id;
-  const duration = activePack.animations[id].frameDurationsMs.reduce((a, b) => a + b, 0);
-  const bounds = win.getBounds();
+  endsAt = duration === null ? null : now + duration;
   if (!pressed && (id === 'glide' || id === 'tiny-steps')) {
+    const bounds = win.getBounds();
     const area = screen.getDisplayMatching(bounds).workArea;
-    const availableLeft = bounds.x - area.x;
-    const availableRight = area.x + area.width - bounds.x - bounds.width;
+    const availableLeft = Math.max(0, bounds.x - area.x);
+    const availableRight = Math.max(0, area.x + area.width - bounds.x - bounds.width);
     const sign = availableRight >= availableLeft ? 1 : -1;
     const distance = id === 'glide' ? 126 : 94;
-    const dx = sign * Math.min(distance, Math.max(availableLeft, availableRight));
-    const time = id === 'tiny-steps' ? Math.max(1900, duration * 3) : duration;
-    flip = id === 'tiny-steps' ? sign > 0 : sign < 0;
-    motion = { id, x: bounds.x, y: bounds.y, dx, start: Date.now(), time };
-    win.webContents.send('pet:animate', { id, flip, repeat: id === 'tiny-steps' });
-    return;
+    const facing = item.facing ?? (id === 'tiny-steps' ? 'left' : 'front');
+    flip = facing !== 'front' && (facing === 'left' ? sign > 0 : sign < 0);
+    motion = { id, bounds, area, endX: bounds.x + sign * Math.min(distance, Math.max(availableLeft, availableRight)),
+      start: now, duration };
   }
-  win.webContents.send('pet:animate', { id, flip });
+  win.webContents.send('pet:animate', { id, flip, repeatFrames, duration, startedAt: now });
+}
+
+function advancePlayback(now) {
+  if (motion) {
+    const { id, bounds, area, endX, start, duration } = motion;
+    let progress = Math.min(1, Math.max(0, (now - start) / duration));
+    if (id === 'glide') {
+      // The sprite already rises and lands on its own ground line. A native
+      // vertical arc would apply the same movement twice.
+      const delays = activePack.animations.glide.frameDurationsMs;
+      const leadIn = delays[0];
+      const leadOut = delays.at(-1);
+      if (delays.length > 2 && duration > leadIn + leadOut) {
+        progress = Math.min(1, Math.max(0, (now - start - leadIn) / (duration - leadIn - leadOut)));
+      }
+      progress = progress * progress * (3 - 2 * progress);
+    }
+    const b = win.getBounds();
+    const next = clamp({ ...b, x: bounds.x + (endX - bounds.x) * progress, y: bounds.y }, area);
+    if (next.x !== b.x || next.y !== b.y) win.setPosition(next.x, next.y);
+  }
+  if (endsAt !== null && now >= endsAt) {
+    if (motion && !smokePath) remember();
+    nextRoamAt = now + 30000;
+    nextPeekAt = now + 2000;
+    play('idle', { now });
+  }
 }
 
 function activity() {
   lastInput = Date.now();
+  nextRoamAt = lastInput + 30000;
+  nextPeekAt = lastInput + 2000;
+}
+
+function setRoaming(value) {
+  settings.roam = value;
+  if (!value && ['tiny-steps', 'tail-nap', 'sneaky-peek'].includes(current)) play('idle');
+  activity();
 }
 
 function behaviors(now) {
-  if (motion === null && current === 'tiny-steps') play('idle');
-  if (pressed || click || !settings.roam || !win.isVisible()) return;
-  if (current === 'idle' && now - lastInput > 90000) play('tail-nap');
-  else if (current === 'idle' && now - lastAuto > 30000) {
-    lastAuto = now;
-    play('tiny-steps');
+  if (pressed || click || importing || !settings.roam || !win.isVisible() || current !== 'idle') return;
+  if (now - lastInput > 90000) play('tail-nap', { now });
+  else if (now >= nextRoamAt) {
+    nextRoamAt = now + 30000;
+    play('tiny-steps', { now });
   }
 }
 
@@ -181,14 +217,13 @@ function menuItems() {
       void save();
     } },
     { label: '自由活动', type: 'checkbox', checked: settings.roam, click: item => {
-      settings.roam = item.checked;
-      if (!settings.roam && ['tiny-steps', 'tail-nap'].includes(current)) play('idle');
-      activity();
+      setRoaming(item.checked);
       void save();
     } },
     { label: '大小', submenu: sizes.map((size, index) => ({
       label: ['小', '中', '大'][index], type: 'radio', checked: settings.size === size,
       click: () => {
+        if (motion) play('idle');
         const b = win.getBounds();
         const next = { ...b, y: b.y + b.height - size, x: b.x + Math.round((b.width - size) / 2),
           width: size, height: size };
@@ -224,6 +259,57 @@ function sendPack(pack) {
   });
 }
 
+async function storePack(candidate) {
+  const folder = await fs.mkdtemp(path.join(profile, 'pack-'));
+  const manifest = { version: 1, animations: {} };
+  for (const [id, { source, ...item }] of Object.entries(candidate.animations)) {
+    const filename = id + path.extname(item.file);
+    manifest.animations[id] = { ...item, file: filename };
+    await fs.writeFile(path.join(folder, filename), Buffer.from(source.split(',')[1], 'base64'));
+  }
+  await fs.writeFile(path.join(folder, 'manifest.json'), JSON.stringify(manifest));
+  return path.basename(folder);
+}
+
+function packFingerprint(pack) {
+  const hash = createHash('sha256');
+  for (const id of packActions) {
+    const bytes = Buffer.from(pack.animations[id].source.split(',')[1], 'base64');
+    hash.update(id + ':');
+    hash.update(createHash('sha256').update(bytes).digest('hex'));
+    hash.update('\n');
+  }
+  return hash.digest('hex');
+}
+
+async function loadCustomPack() {
+  const original = await readPack(path.join(profile, settings.customPack));
+  const upgradeDir = path.join(process.resourcesPath, 'pet-upgrade');
+  let upgraded;
+  try {
+    const { from } = JSON.parse(await fs.readFile(path.join(upgradeDir, 'upgrade.json'), 'utf8'));
+    if (from === packFingerprint(original)) {
+      const candidate = await readPack(upgradeDir);
+      const folder = await storePack(candidate);
+      await sendPack(candidate);
+      const previous = settings.customPack;
+      settings.customPack = folder;
+      try {
+        await save();
+        upgraded = candidate;
+      } catch (error) {
+        settings.customPack = previous;
+        throw error;
+      }
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') console.error('角色升级失败，继续使用已有角色', error.message);
+  }
+  if (!upgraded) await sendPack(original);
+  activePack = upgraded || original;
+  activeCustomPack = settings.customPack;
+}
+
 async function importPack() {
   if (importing) return;
   importing = true;
@@ -234,18 +320,18 @@ async function importPack() {
     if (result.canceled) return;
     if (path.basename(result.filePaths[0]) !== 'manifest.json') throw Error('请选择 manifest.json');
     const candidate = await readPack(path.dirname(result.filePaths[0]));
-    const folder = await fs.mkdtemp(path.join(profile, 'pack-'));
-    const manifest = { version: 1, animations: {} };
-    await Promise.all(Object.entries(candidate.animations).map(async ([id, { source, ...item }]) => {
-      const filename = id + path.extname(item.file);
-      manifest.animations[id] = { ...item, file: filename };
-      await fs.writeFile(path.join(folder, filename), Buffer.from(source.split(',')[1], 'base64'));
-    }));
-    await fs.writeFile(path.join(folder, 'manifest.json'), JSON.stringify(manifest));
+    const folder = await storePack(candidate);
     await sendPack(candidate);
-    settings.customPack = path.basename(folder);
-    await save();
+    const previous = settings.customPack;
+    settings.customPack = folder;
+    try {
+      await save();
+    } catch (error) {
+      settings.customPack = previous;
+      throw error;
+    }
     activePack = candidate;
+    activeCustomPack = folder;
     oldPack = null;
     showPet();
     play('idle');
@@ -265,6 +351,7 @@ async function restorePack() {
     await sendPack(candidate);
     activePack = candidate;
     delete settings.customPack;
+    activeCustomPack = null;
     await save();
     play('idle');
   } catch (error) {
@@ -278,29 +365,74 @@ function bind(name, handler) {
   });
 }
 
+function sample(now) {
+  const token = ++sampleToken;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(Error('等待动画回执超时')), 5000);
+    sampleRequest = { token, done(value) { clearTimeout(timer); resolve(value); } };
+    win.webContents.send('pet:sample', { now, token });
+  });
+}
+
+async function checkPlayback() {
+  const originalBounds = win.getBounds();
+  const start = Date.now();
+  if (!win.isVisible()) throw Error('悬浮窗未正常显示');
+  setRoaming(false);
+  behaviors(start + 30001);
+  if ((await sample(start)).id !== 'idle') throw Error('关闭自由活动后仍自动散步');
+  setRoaming(true);
+  const scheduled = nextRoamAt;
+  behaviors(scheduled);
+  if ((await sample(scheduled)).id !== 'tiny-steps') throw Error('自由活动未播放散步');
+  setRoaming(false);
+  if ((await sample(Date.now())).id !== 'idle') throw Error('关闭自由活动后未恢复待机');
+
+  for (const id of Object.keys(actions)) {
+    play(id, { now: start });
+    const initial = await sample(start);
+    if (initial.id !== id || !initial.square || !initial.aspectRatioPreserved) throw Error(`动作启动或比例错误：${id}`);
+    const end = endsAt;
+    const travel = motion;
+    if (end !== null) {
+      advancePlayback(end - 1);
+      const last = await sample(end - 1);
+      if (last.id !== id || last.frame !== activePack.animations[id].frameDurationsMs.length - 1) throw Error(`动作提前结束：${id}`);
+      advancePlayback(end);
+      const after = await sample(end);
+      if (after.id !== 'idle') throw Error(`动作未恢复待机：${id}`);
+    } else play('idle', { now: start });
+    const { width, height, x, y } = win.getBounds();
+    if (width !== originalBounds.width || height !== originalBounds.height || width !== height) throw Error('动作改变了窗口尺寸');
+    if (travel && (x !== Math.round(travel.endX) || y !== travel.bounds.y)) throw Error(`移动未在原高度完成：${id}`);
+  }
+
+  win.hide();
+  if (win.isVisible()) throw Error('无法隐藏桌宠');
+  showPet();
+  if (!win.isVisible()) throw Error('无法恢复桌宠');
+}
+
 async function finishSmoke(error, hashes = {}) {
   const checks = [];
   trace('smoke finish: ' + (error || 'renderer succeeded'));
+  const originalPosition = settings.position;
+  const originalRoaming = settings.roam;
   try {
-  if (!error) {
-    for (const id of Object.keys(actions)) {
-      play(id);
-      if (current !== id) error = `未能切换动作 ${id}`;
+    if (!error) {
+      await checkPlayback();
+      checks.push('offline-pack-decode', 'alpha-in-every-frame', 'distinct-animation-frames',
+        'all-menu-actions', 'window-show-hide', 'fixed-aspect-and-canvas', 'motion-lands-before-idle',
+        'all-actions-return-to-idle', 'run-cycle-completes', 'roaming-toggle');
     }
-    play('idle');
-    if (!win.isVisible() || !win.isAlwaysOnTop()) error = '悬浮窗未正常显示';
-    else {
-      win.hide();
-      if (win.isVisible()) error = '无法隐藏桌宠';
-      showPet();
-      if (!win.isVisible()) error = '无法恢复桌宠';
-    }
-    checks.push('offline-pack-decode', 'alpha-in-every-frame', 'distinct-animation-frames', 'all-menu-actions', 'window-show-hide');
+  } catch (failure) {
+    error = failure.message;
   }
-  } catch (failure) { error = failure.message; }
+  settings.position = originalPosition;
+  settings.roam = originalRoaming;
   trace('write result: ' + (error || 'success'));
   await fs.writeFile(smokePath, JSON.stringify({ ok: !error, error, pack: localBrand ? 'local' : 'demo',
-    animations: Object.keys(hashes), checks }, null, 2));
+    customPack: activeCustomPack, size: win?.getBounds().width, animations: Object.keys(hashes), checks }, null, 2));
   app.exit(error ? 1 : 0);
 }
 
@@ -339,7 +471,6 @@ async function launch() {
 
   bind('loaded', ({ token, error }) => { if (loading?.token === token) loading.done(error); });
   bind('hit', value => { hit = value === true; refreshIgnore(); });
-  bind('ended', id => { if (current === id) { current = 'idle'; motion = null; } });
   bind('pointer-down', () => {
     if (!hit || pressed) return;
     activity();
@@ -370,7 +501,12 @@ async function launch() {
   });
   bind('pointer-cancel', () => { if (pressed?.dragging) remember(); pressed = null; refreshIgnore(); });
   bind('menu', popup);
-  if (smokePath) bind('verified', ({ hashes, error }) => { void finishSmoke(error, hashes); });
+  if (smokePath) {
+    bind('sampled', result => {
+      if (sampleRequest?.token === result.token) sampleRequest.done(result);
+    });
+    bind('verified', ({ hashes, error }) => { void finishSmoke(error, hashes); });
+  }
 
   trace('load window');
   win.webContents.on('render-process-gone', (_event, details) => trace('renderer gone ' + details.reason));
@@ -378,9 +514,7 @@ async function launch() {
   trace('window loaded');
   if (typeof settings.customPack === 'string' && /^pack-[A-Za-z0-9]+$/.test(settings.customPack)) {
     try {
-      const candidate = await readPack(path.join(profile, settings.customPack));
-      await sendPack(candidate);
-      activePack = candidate;
+      await loadCustomPack();
     } catch (error) {
       delete settings.customPack;
       await save();
@@ -412,14 +546,16 @@ async function launch() {
   showPet();
   play('idle');
   const constrain = () => {
+    if (motion) play('idle');
     const b = win.getBounds();
     win.setBounds({ ...b, ...clamp(b) });
     remember();
   };
   screen.on('display-removed', constrain);
   screen.on('display-metrics-changed', constrain);
-  setInterval(() => {
+  if (!smokePath) setInterval(() => {
     const now = Date.now();
+    advancePlayback(now);
     updateCursor(now);
     behaviors(now);
   }, 25).unref();
