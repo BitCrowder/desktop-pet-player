@@ -2,6 +2,7 @@ const canvas = document.querySelector('canvas');
 const ctx = canvas.getContext('2d', { willReadFrequently: true });
 let pack;
 let playing;
+let frozen = false;
 let cursor;
 let hit = false;
 let previousHit = false;
@@ -47,7 +48,7 @@ function start({ id, flip = false, repeatFrames = false, duration = null, starte
 }
 
 function paintAt(now) {
-  if (!playing) return;
+  if (!playing || frozen) return;
   const { id, flip, repeatFrames, duration, startedAt } = playing;
   const elapsed = duration === null ? now - startedAt : Math.min(now - startedAt, duration - 1);
   render(id, animationFrame(pack[id], elapsed, repeatFrames), flip);
@@ -82,6 +83,11 @@ window.pet.on('pack', async ({ animations, token }) => {
 });
 
 window.pet.on('animate', start);
+window.pet.on('freeze', () => { frozen = true; });
+window.pet.on('resume', pausedFor => {
+  if (playing && frozen) playing.startedAt += pausedFor;
+  frozen = false;
+});
 window.pet.on('cursor', point => {
   cursor = point;
   checkCursor();
@@ -96,6 +102,7 @@ canvas.addEventListener('pointerup', event => {
   if (event.button === 0) window.pet.send('pointer-up');
 });
 canvas.addEventListener('pointercancel', () => window.pet.send('pointer-cancel'));
+canvas.addEventListener('lostpointercapture', () => window.pet.send('pointer-cancel'));
 canvas.addEventListener('contextmenu', event => {
   event.preventDefault();
   window.pet.send('menu');

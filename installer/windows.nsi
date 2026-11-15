@@ -61,7 +61,8 @@ Section "Install"
   SetOutPath "$INSTDIR"
   File /r "${PAYLOAD_DIR}\*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
-  CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}.lnk" "$INSTDIR\${APP_ID}.exe"
+  CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}.lnk" "$INSTDIR\${APP_ID}.exe" "" "$INSTDIR\resources\app\app\shortcut.ico" 0
+  CreateShortCut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\${APP_ID}.exe" "" "$INSTDIR\resources\app\app\shortcut.ico" 0
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}" "DisplayName" "${PRODUCT_NAME}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}" "DisplayVersion" "${APP_VERSION}"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}" "DisplayIcon" "$INSTDIR\${APP_ID}.exe"
@@ -74,6 +75,7 @@ SectionEnd
 
 Section "Uninstall"
   Delete "$SMPROGRAMS\${PRODUCT_NAME}.lnk"
+  Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
   !include "${UNINSTALL_FILES}"
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"

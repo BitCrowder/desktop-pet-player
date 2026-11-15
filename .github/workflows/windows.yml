@@ -39,8 +39,8 @@ jobs:
         run: |
           if (Test-Path -LiteralPath 'private-assets') { throw 'The public checkout contains private assets.' }
           npm run build:win
-      - name: Verify Windows upgrade and animation playback
-        run: npm run smoke:win -- --upgrade-from-v1
+      - name: Verify Windows upgrade, shortcuts, animation, and normal quit
+        run: npm run smoke:win -- --upgrade-from-1.1.0
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-pet-player-windows-x64

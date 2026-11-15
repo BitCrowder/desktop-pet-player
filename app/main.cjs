@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, Tray, screen, ipcMain, dialog, nativeImage, se
 const fs = require('node:fs/promises');
 const { appendFileSync } = require('node:fs');
 const { createHash } = require('node:crypto');
+const { setTimeout: delay } = require('node:timers/promises');
 const path = require('node:path');
 const { readPack, actions: packActions } = require('./packs.cjs');
 const { planPlayback } = require('./playback.js');
@@ -63,6 +64,42 @@ let activeCustomPack = null;
 let sampleRequest;
 let sampleToken = 0;
 let writeQueue = Promise.resolve();
+let desktopTimer;
+let constrainDisplay;
+let stopping = false;
+let quitRequested = false;
+let quitReady = false;
+let smokeResult;
+
+function desktopReady() {
+  return !stopping && win && !win.isDestroyed() && win.webContents?.isDestroyed() === false;
+}
+
+function stopDesktop() {
+  if (stopping) return;
+  stopping = true;
+  clearInterval(desktopTimer);
+  clearTimeout(click);
+  desktopTimer = click = pressed = motion = null;
+  if (constrainDisplay) {
+    screen.off('display-removed', constrainDisplay);
+    screen.off('display-metrics-changed', constrainDisplay);
+    constrainDisplay = null;
+  }
+  loading?.done('桌宠正在退出');
+  if (tray && !tray.isDestroyed()) tray.destroy();
+  tray = null;
+}
+
+function startDesktopTimer() {
+  desktopTimer = setInterval(() => {
+    if (!desktopReady()) return;
+    const now = Date.now();
+    advancePlayback(now);
+    updateCursor(now);
+    behaviors(now);
+  }, 25).unref();
+}
 
 function save() {
   const payload = JSON.stringify(settings);
@@ -94,26 +131,70 @@ function remember() {
 }
 
 function refreshIgnore() {
+  if (!desktopReady()) return;
   const next = !hit && !pressed;
   if (next === ignoring) return;
   ignoring = next;
   win.setIgnoreMouseEvents(ignoring, { forward: true });
 }
 
-function updateCursor(now) {
-  if (!win.isVisible() || !activePack) return;
-  const b = win.getBounds();
-  const cursor = screen.getCursorScreenPoint();
-  if (pressed) {
-    const dx = cursor.x - pressed.cursor.x;
-    const dy = cursor.y - pressed.cursor.y;
-    if (Math.hypot(dx, dy) >= 5) pressed.dragging = true;
-    if (pressed.dragging) {
-      const target = clamp({ ...b, x: pressed.x + dx, y: pressed.y + dy },
-        screen.getDisplayNearestPoint(cursor).workArea);
-      if (target.x !== b.x || target.y !== b.y) win.setPosition(target.x, target.y);
-    }
+function beginPointer(cursor, now = Date.now()) {
+  if (pressed || importing) return;
+  activity();
+  const { x, y } = win.getBounds();
+  const secondClick = Boolean(click);
+  clearTimeout(click);
+  click = null;
+  pressed = { x, y, cursor, startedAt: now, dragging: false, secondClick };
+  motion = null;
+  win.webContents.send('pet:freeze');
+  refreshIgnore();
+}
+
+function movePointer(cursor) {
+  const dx = cursor.x - pressed.cursor.x;
+  const dy = cursor.y - pressed.cursor.y;
+  if (Math.hypot(dx, dy) >= 5) pressed.dragging = true;
+  if (!pressed.dragging) return;
+  const width = settings.size;
+  const height = settings.size;
+  const area = screen.getDisplayNearestPoint(cursor).workArea;
+  const position = clamp({ width, height, x: pressed.x + dx, y: pressed.y + dy }, area);
+  const bounds = win.getBounds();
+  if (position.x !== bounds.x || position.y !== bounds.y) win.setPosition(position.x, position.y);
+  // A DPI transition can resize the native window during a move.
+  const moved = win.getBounds();
+  if (moved.width !== width || moved.height !== height) {
+    win.setBounds({ ...position, width, height });
   }
+}
+
+function scheduleClick() {
+  click = setTimeout(() => { click = null; play('act-cute'); }, 275);
+}
+
+function endPointer(cancelled = false, now = Date.now()) {
+  if (!desktopReady() || !pressed) return;
+  const { dragging, startedAt, secondClick } = pressed;
+  pressed = null;
+  const pausedFor = Math.max(0, now - startedAt);
+  if (endsAt !== null) endsAt += pausedFor;
+  win.webContents.send('pet:resume', pausedFor);
+  refreshIgnore();
+  if (dragging || cancelled) {
+    clearTimeout(click);
+    click = null;
+    if (dragging && !smokePath) remember();
+    return;
+  }
+  if (secondClick) play('tantrum-roll');
+  else scheduleClick();
+}
+
+function updateCursor(now) {
+  if (!desktopReady() || !win.isVisible() || !activePack) return;
+  const cursor = screen.getCursorScreenPoint();
+  if (pressed) movePointer(cursor);
   const bounds = win.getBounds();
   const local = { x: (cursor.x - bounds.x) / bounds.width, y: (cursor.y - bounds.y) / bounds.height };
   if (!lastCursor || lastCursor.x !== local.x || lastCursor.y !== local.y) {
@@ -133,7 +214,7 @@ function updateCursor(now) {
 
 function play(id, { flip = false, now = Date.now() } = {}) {
   const item = activePack?.animations[id];
-  if (!item) return;
+  if (!desktopReady() || !item) return;
   const { duration, repeatFrames } = planPlayback(id, item);
   motion = null;
   current = id;
@@ -154,6 +235,7 @@ function play(id, { flip = false, now = Date.now() } = {}) {
 }
 
 function advancePlayback(now) {
+  if (pressed) return;
   if (motion) {
     const { id, bounds, area, endX, start, duration } = motion;
     let progress = Math.min(1, Math.max(0, (now - start) / duration));
@@ -202,7 +284,7 @@ function behaviors(now) {
 }
 
 function showPet() {
-  if (!win.isVisible()) win.showInactive();
+  if (desktopReady() && !win.isVisible()) win.showInactive();
 }
 
 function menuItems() {
@@ -241,11 +323,13 @@ function menuItems() {
 }
 
 function popup() {
+  if (!desktopReady()) return;
   activity();
   Menu.buildFromTemplate(menuItems()).popup({ window: win });
 }
 
 function sendPack(pack) {
+  if (!desktopReady()) return Promise.reject(Error('桌宠窗口已关闭'));
   const token = ++packToken;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => { loading = null; reject(Error('角色素材读取超时')); }, 20000);
@@ -317,7 +401,7 @@ async function importPack() {
   try {
     const result = await dialog.showOpenDialog({ title: '选择角色包的 manifest.json',
       properties: ['openFile'], filters: [{ name: '角色清单', extensions: ['json'] }] });
-    if (result.canceled) return;
+    if (result.canceled || !desktopReady()) return;
     if (path.basename(result.filePaths[0]) !== 'manifest.json') throw Error('请选择 manifest.json');
     const candidate = await readPack(path.dirname(result.filePaths[0]));
     const folder = await storePack(candidate);
@@ -336,8 +420,9 @@ async function importPack() {
     showPet();
     play('idle');
   } catch (error) {
+    if (!desktopReady()) return;
     if (oldPack) await sendPack(oldPack).catch(console.error);
-    dialog.showErrorBox('无法导入角色包', error.message);
+    if (desktopReady()) dialog.showErrorBox('无法导入角色包', error.message);
   } finally {
     importing = false;
   }
@@ -355,13 +440,13 @@ async function restorePack() {
     await save();
     play('idle');
   } catch (error) {
-    dialog.showErrorBox('无法恢复内置角色', error.message);
+    if (desktopReady()) dialog.showErrorBox('无法恢复内置角色', error.message);
   } finally { importing = false; }
 }
 
 function bind(name, handler) {
   ipcMain.on(`pet:${name}`, (event, payload) => {
-    if (event.sender === win?.webContents && event.senderFrame === win.webContents.mainFrame) handler(payload);
+    if (desktopReady() && event.sender === win.webContents && event.senderFrame === win.webContents.mainFrame) handler(payload);
   });
 }
 
@@ -407,6 +492,26 @@ async function checkPlayback() {
     if (travel && (x !== Math.round(travel.endX) || y !== travel.bounds.y)) throw Error(`移动未在原高度完成：${id}`);
   }
 
+  play('glide');
+  const cursor = screen.getCursorScreenPoint();
+  const before = win.getBounds();
+  const area = screen.getDisplayMatching(before).workArea;
+  const direction = before.x - area.x > 24 ? -1 : 1;
+  const hold = Date.now();
+  scheduleClick();
+  beginPointer(cursor, hold);
+  if (click) throw Error('拖动时仍存在待处理的单击');
+  const frozen = await sample(hold);
+  if (frozen.id !== 'glide') throw Error('按住时切换了动作');
+  movePointer({ x: cursor.x + 24 * direction, y: cursor.y });
+  advancePlayback(hold + 5000);
+  const dragged = await sample(hold + 5000);
+  const moved = win.getBounds();
+  if (moved.x === before.x || moved.width !== before.width || moved.height !== before.height ||
+      dragged.id !== frozen.id || dragged.frame !== frozen.frame || !dragged.square) throw Error('拖动改变了画面或尺寸');
+  endPointer(false, hold + 5000);
+  play('idle');
+
   win.hide();
   if (win.isVisible()) throw Error('无法隐藏桌宠');
   showPet();
@@ -423,17 +528,31 @@ async function finishSmoke(error, hashes = {}) {
       await checkPlayback();
       checks.push('offline-pack-decode', 'alpha-in-every-frame', 'distinct-animation-frames',
         'all-menu-actions', 'window-show-hide', 'fixed-aspect-and-canvas', 'motion-lands-before-idle',
-        'all-actions-return-to-idle', 'run-cycle-completes', 'roaming-toggle');
+        'all-actions-return-to-idle', 'run-cycle-completes', 'roaming-toggle', 'drag-keeps-pose-and-size');
     }
   } catch (failure) {
     error = failure.message;
   }
   settings.position = originalPosition;
   settings.roam = originalRoaming;
-  trace('write result: ' + (error || 'success'));
-  await fs.writeFile(smokePath, JSON.stringify({ ok: !error, error, pack: localBrand ? 'local' : 'demo',
-    customPack: activeCustomPack, size: win?.getBounds().width, animations: Object.keys(hashes), checks }, null, 2));
-  app.exit(error ? 1 : 0);
+  smokeResult = { ok: !error, error, pack: localBrand ? 'local' : 'demo',
+    customPack: activeCustomPack, size: desktopReady() ? win.getBounds().width : null,
+    animations: Object.keys(hashes), checks };
+  if (error) {
+    await fs.writeFile(smokePath, JSON.stringify(smokeResult, null, 2));
+    stopDesktop();
+    app.exit(1);
+    return;
+  }
+
+  // Run real polling and queue a real menu interaction before testing Exit.
+  startDesktopTimer();
+  play('glide');
+  await delay(85);
+  scheduleClick();
+  if (!desktopTimer || !click || !motion) throw Error('未能准备退出回归测试');
+  menuItems().at(-1).click();
+
 }
 
 async function launch() {
@@ -459,6 +578,10 @@ async function launch() {
       contextIsolation: true, sandbox: true, nodeIntegration: false, devTools: false,
     },
   });
+  win.once('closed', () => {
+    stopDesktop();
+    win = null;
+  });
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
   win.webContents.on('will-navigate', event => event.preventDefault());
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
@@ -471,41 +594,24 @@ async function launch() {
 
   bind('loaded', ({ token, error }) => { if (loading?.token === token) loading.done(error); });
   bind('hit', value => { hit = value === true; refreshIgnore(); });
-  bind('pointer-down', () => {
-    if (!hit || pressed) return;
-    activity();
-    const { x, y } = win.getBounds();
-    motion = null;
-    play('idle');
-    pressed = { x, y, cursor: screen.getCursorScreenPoint(), dragging: false };
-    refreshIgnore();
-  });
+  bind('pointer-down', () => { if (hit) beginPointer(screen.getCursorScreenPoint()); });
   bind('pointer-up', () => {
-    if (!pressed) return;
-    const { dragging } = pressed;
-    pressed = null;
-    refreshIgnore();
-    if (dragging) {
-      clearTimeout(click);
-      click = null;
-      remember();
-      return;
-    }
-    if (click) {
-      clearTimeout(click);
-      click = null;
-      play('tantrum-roll');
-    } else {
-      click = setTimeout(() => { click = null; play('act-cute'); }, 275);
-    }
+    if (pressed) movePointer(screen.getCursorScreenPoint());
+    endPointer();
   });
-  bind('pointer-cancel', () => { if (pressed?.dragging) remember(); pressed = null; refreshIgnore(); });
+  bind('pointer-cancel', () => endPointer(true));
   bind('menu', popup);
   if (smokePath) {
     bind('sampled', result => {
       if (sampleRequest?.token === result.token) sampleRequest.done(result);
     });
-    bind('verified', ({ hashes, error }) => { void finishSmoke(error, hashes); });
+    bind('verified', ({ hashes, error }) => {
+      void finishSmoke(error, hashes).catch(async failure => {
+        trace(failure.stack);
+        stopDesktop();
+        app.exit(1);
+      });
+    });
   }
 
   trace('load window');
@@ -531,8 +637,11 @@ async function launch() {
   tray = new Tray(icon);
   trace('tray created');
   tray.setToolTip(app.getName());
-  const refreshTray = () => tray.setContextMenu(Menu.buildFromTemplate(menuItems()));
+  const refreshTray = () => {
+    if (desktopReady() && tray) tray.setContextMenu(Menu.buildFromTemplate(menuItems()));
+  };
   tray.on('click', () => {
+    if (!desktopReady()) return;
     if (process.platform === 'darwin') popup();
     else {
       if (win.isVisible()) win.hide();
@@ -541,24 +650,29 @@ async function launch() {
   });
   tray.on('right-click', refreshTray);
   win.on('show', refreshTray);
-  win.on('hide', refreshTray);
+  win.on('hide', () => {
+    endPointer(true);
+    clearTimeout(click);
+    click = null;
+    refreshTray();
+  });
   refreshTray();
   showPet();
   play('idle');
-  const constrain = () => {
+  constrainDisplay = () => {
+    if (!desktopReady()) return;
+    if (pressed) {
+      movePointer(screen.getCursorScreenPoint());
+      return;
+    }
     if (motion) play('idle');
-    const b = win.getBounds();
+    const b = { ...win.getBounds(), width: settings.size, height: settings.size };
     win.setBounds({ ...b, ...clamp(b) });
     remember();
   };
-  screen.on('display-removed', constrain);
-  screen.on('display-metrics-changed', constrain);
-  if (!smokePath) setInterval(() => {
-    const now = Date.now();
-    advancePlayback(now);
-    updateCursor(now);
-    behaviors(now);
-  }, 25).unref();
+  screen.on('display-removed', constrainDisplay);
+  screen.on('display-metrics-changed', constrainDisplay);
+  if (!smokePath) startDesktopTimer();
   if (smokePath) {
     trace('verify renderer');
     win.webContents.send('pet:verify');
@@ -567,10 +681,33 @@ async function launch() {
 
 if (!smokePath && !app.requestSingleInstanceLock()) app.quit();
 else {
-  app.on('second-instance', () => { if (win && !win.isDestroyed()) showPet(); });
+  app.on('before-quit', event => {
+    if (quitReady) return;
+    event.preventDefault();
+    if (quitRequested) return;
+    quitRequested = true;
+    const hadPendingWork = Boolean(desktopTimer && click && constrainDisplay);
+    stopDesktop();
+    void writeQueue.catch(console.error).then(async () => {
+      if (smokeResult) {
+        const cleanedUp = hadPendingWork && !desktopTimer && !click && !constrainDisplay && !tray;
+        if (cleanedUp) smokeResult.checks.push('tray-quit-stops-callbacks');
+        else {
+          smokeResult.ok = false;
+          smokeResult.error = '退出时没有正确结束桌面任务';
+        }
+        await fs.writeFile(smokePath, JSON.stringify(smokeResult, null, 2));
+      }
+    }).catch(console.error).finally(() => {
+      quitReady = true;
+      app.quit();
+    });
+  });
+  app.on('second-instance', showPet);
   app.on('window-all-closed', () => app.quit());
   app.whenReady().then(launch).catch(async error => {
     trace('launch error ' + error.stack);
+    if (stopping) return;
     if (smokePath) await finishSmoke(error.message);
     else {
       dialog.showErrorBox('桌宠启动失败', error.message);

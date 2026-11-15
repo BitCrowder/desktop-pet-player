@@ -132,6 +132,7 @@ try {
     await cp(path.join(root, 'private-assets', 'upgrade.json'), path.join(installedUpgrade, 'upgrade.json'));
   }
   if (personal || petUpgrade) {
+    await cp(path.join(root, 'private-assets', 'shortcut.ico'), path.join(appDir, 'app', 'shortcut.ico'));
     await cp(path.join(root, 'private-assets', 'INSTALL-ZH-CN.txt'), path.join(payload, 'INSTALL-ZH-CN.txt'));
   }
   await writeFile(path.join(appDir, 'package.json'), JSON.stringify({

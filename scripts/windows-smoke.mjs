@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { access, cp, copyFile, mkdir, mkdtemp, open, readFile, rm, writeFile } from 'node:fs/promises';
@@ -7,24 +7,29 @@ import { release, tmpdir } from 'node:os';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 
 assert.equal(process.platform, 'win32', 'The installer check must run on Windows.');
 const root = fileURLToPath(new URL('..', import.meta.url));
 const { version } = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'));
 const personal = process.argv.includes('--private');
-const upgrade = process.argv.includes('--upgrade-from-v1');
-assert.ok(!upgrade || (!personal && version !== '1.0.0'), 'Upgrade verification requires a newer public build.');
+const upgrade = process.argv.includes('--upgrade-from-1.1.0');
+const previousVersion = '1.1.0';
+assert.ok(!upgrade || (!personal && version !== previousVersion), 'Upgrade verification requires a newer public build.');
 const mode = personal ? 'private' : 'public';
 const appId = personal ? 'MomongaDesktopPet' : 'DesktopPetPlayer';
+const productName = personal ? 'Momonga Desktop Pet' : 'Desktop Pet Player';
 const outputDir = path.join(root, 'dist', 'windows', mode);
 const filename = `${appId}-Setup-${version}-x64.exe`;
 const installer = path.join(outputDir, filename);
 const installedDir = path.join(process.env.LOCALAPPDATA, 'Programs', appId);
 const installedExe = path.join(installedDir, `${appId}.exe`);
+const installedIcon = path.join(installedDir, 'resources', 'app', 'app', 'shortcut.ico');
 const uninstaller = path.join(installedDir, 'Uninstall.exe');
 const profile = path.join(process.env.APPDATA, appId);
-const previousInstallerUrl = 'https://github.com/BitCrowder/desktop-pet-player/releases/download/v1.0.0/DesktopPetPlayer-Setup-1.0.0-x64.exe';
-const previousInstallerSha = '109992949986a1eab2f2ba6e79e1c49c4bcabbd4b0d116bd729b6dbfc44625db';
+const previousInstallerUrl = `https://github.com/BitCrowder/desktop-pet-player/releases/download/v${previousVersion}/DesktopPetPlayer-Setup-${previousVersion}-x64.exe`;
+const previousInstallerSha = '1b755757323ea1ebd1d0d738c1e9c1b13548f0cddaa824338651d995b652b6b6';
+const execFileAsync = promisify(execFile);
 let ownsTestProfile = false;
 
 async function exists(filename) {
@@ -74,18 +79,53 @@ async function installedVersion() {
   return JSON.parse(await readFile(path.join(installedDir, 'resources', 'app', 'package.json'), 'utf8')).version;
 }
 
+async function installedShortcuts() {
+  // Resolve Windows shell folders rather than assuming Desktop lives under USERPROFILE.
+  const script = [
+    '$shell = New-Object -ComObject WScript.Shell',
+    "$knownFolders = @('DesktopDirectory', 'Programs')",
+    '$links = foreach ($folder in $knownFolders) {',
+    '  $filename = Join-Path ([Environment]::GetFolderPath($folder)) $env:PET_LINK_NAME',
+    '  if (Test-Path -LiteralPath $filename) {',
+    '    $link = $shell.CreateShortcut($filename)',
+    '    [PSCustomObject]@{ filename = $filename; target = $link.TargetPath; icon = $link.IconLocation }',
+    '  } else { [PSCustomObject]@{ filename = $filename; target = $null; icon = $null } }',
+    '}',
+    'ConvertTo-Json -InputObject @($links) -Compress',
+  ].join('\n');
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script], {
+    env: { ...process.env, PET_LINK_NAME: `${productName}.lnk` },
+    timeout: 15_000,
+  });
+  return JSON.parse(stdout);
+}
+
+async function assertShortcutsInstalled() {
+  await access(installedIcon);
+  const expectedIcon = path.join(root, personal ? 'private-assets' : 'app', 'shortcut.ico');
+  assert.equal(await sha256(installedIcon), await sha256(expectedIcon), 'The installed shortcut icon is not the intended icon.');
+  const shortcuts = await installedShortcuts();
+  assert.equal(shortcuts.length, 2);
+  for (const { filename, target, icon } of shortcuts) {
+    assert.ok(target, `The installer did not create ${filename}.`);
+    assert.equal(path.normalize(target).toLowerCase(), installedExe.toLowerCase(), `Unexpected shortcut target in ${filename}.`);
+    assert.equal(path.normalize(icon.replace(/,\s*0$/, '')).toLowerCase(), installedIcon.toLowerCase(),
+      `Unexpected shortcut icon in ${filename}.`);
+  }
+}
+
 async function setUpPreviousVersion(fixtures) {
   assert.equal(await exists(profile), false, 'The upgrade check requires a clean Windows user profile.');
-  console.log('Downloading and installing the released v1.0.0 package.');
+  console.log(`Downloading and installing the released v${previousVersion} package.`);
   const previousInstaller = path.join(fixtures, 'previous-setup.exe');
   const response = await fetch(previousInstallerUrl, { signal: AbortSignal.timeout(180_000) });
   assert.ok(response.ok && response.body, `Could not download the public v1.0.0 installer: HTTP ${response.status}.`);
   await pipeline(response.body, createWriteStream(previousInstaller));
-  assert.equal(await sha256(previousInstaller), previousInstallerSha, 'The downloaded v1.0.0 installer checksum does not match.');
+  assert.equal(await sha256(previousInstaller), previousInstallerSha, `The downloaded v${previousVersion} installer checksum does not match.`);
   await run(previousInstaller, ['/S']);
-  assert.equal(await installedVersion(), '1.0.0');
+  assert.equal(await installedVersion(), previousVersion);
 
-  // Recreate the files written by v1.0.0 character import. The fixture is the
+  // Recreate the files written by the previous version's character import. The fixture is the
   // previous public release's own demo pack. It contains only public artwork.
   const customPack = 'pack-ciUpgrade';
   const installedPack = path.join(installedDir, 'resources', 'pet-pack');
@@ -118,15 +158,16 @@ assert.equal(await exists(installedDir), false, 'The test requires a clean Windo
 const fixtures = await mkdtemp(path.join(tmpdir(), 'desktop-pet-smoke-'));
 try {
   const prior = upgrade ? await setUpPreviousVersion(fixtures) : null;
-  console.log(prior ? 'Installing the new version over v1.0.0.' : 'Installing the new version.');
+  console.log(prior ? `Installing the new version over v${previousVersion}.` : 'Installing the new version.');
   await run(installer, ['/S']);
   assert.equal(await exists(installedExe), true, 'NSIS did not install the Windows executable.');
   assert.equal(await exists(uninstaller), true, 'NSIS did not install the uninstaller.');
   assert.equal(await installedVersion(), version, 'The new version was not installed.');
   await assertWindowsX64(installedExe);
+  await assertShortcutsInstalled();
   if (prior) await prior.assertPreserved();
 
-  const sourcePack = path.join(root, personal ? 'private-assets/pet-pack' : 'demo-pack');
+  const sourcePack = path.join(root, personal ? 'private-assets/pet-pack-v1.1' : 'demo-pack');
   const installedPack = path.join(installedDir, 'resources', 'pet-pack');
   const manifest = await readFile(path.join(sourcePack, 'manifest.json'), 'utf8');
   assert.equal(await readFile(path.join(installedPack, 'manifest.json'), 'utf8'), manifest);
@@ -162,10 +203,11 @@ try {
     'The installed renderer did not load all animations.');
   const requiredChecks = ['offline-pack-decode', 'alpha-in-every-frame', 'distinct-animation-frames',
     'all-menu-actions', 'window-show-hide', 'fixed-aspect-and-canvas', 'motion-lands-before-idle',
-    'all-actions-return-to-idle', 'run-cycle-completes', 'roaming-toggle'];
+    'all-actions-return-to-idle', 'run-cycle-completes', 'roaming-toggle', 'tray-quit-stops-callbacks', 'drag-keeps-pose-and-size'];
   for (const check of requiredChecks) {
     assert.ok(result.checks.includes(check), `The installed renderer did not confirm ${check}.`);
   }
+  if (prior) await prior.assertPreserved();
 
   // Run a copy so the uninstaller can remove its original executable synchronously.
   const testUninstaller = path.join(fixtures, 'Uninstall.exe');
@@ -173,8 +215,12 @@ try {
   await run(testUninstaller, ['/S', `_?=${installedDir}`], { windowsVerbatimArguments: true });
   assert.equal(await exists(installedExe), false, 'The uninstaller left the app executable installed.');
   assert.equal(await exists(uninstaller), false, 'The uninstaller left its installed executable behind.');
+  for (const { filename, target } of await installedShortcuts()) {
+    assert.equal(target, null, `The uninstaller left shortcut ${filename} behind.`);
+  }
   const evidence = { installer: filename, sha256: expectedHash, windowsRelease: release(), architecture: process.arch,
-    ...(prior && { upgradedFrom: '1.0.0', existingSettingsAndPackPreserved: true }), result };
+    desktopAndStartMenuShortcutsVerified: true, appProcessExitedNormally: true,
+    ...(prior && { upgradedFrom: previousVersion, existingSettingsAndPackPreserved: true }), result };
   await writeFile(path.join(outputDir, 'smoke-results.json'), JSON.stringify(evidence, null, 2) + '\n');
   console.log(evidence);
 } finally {
