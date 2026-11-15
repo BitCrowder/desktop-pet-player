@@ -622,6 +622,7 @@ async function launch() {
     try {
       await loadCustomPack();
     } catch (error) {
+      if (stopping) return;
       delete settings.customPack;
       await save();
       if (!smokePath) dialog.showErrorBox('自定义角色读取失败，已使用内置角色', error.message);
@@ -688,6 +689,7 @@ else {
     quitRequested = true;
     const hadPendingWork = Boolean(desktopTimer && click && constrainDisplay);
     stopDesktop();
+    trace('before quit: desktop callbacks removed');
     void writeQueue.catch(console.error).then(async () => {
       if (smokeResult) {
         const cleanedUp = hadPendingWork && !desktopTimer && !click && !constrainDisplay && !tray;
@@ -703,6 +705,10 @@ else {
       app.quit();
     });
   });
+  if (smokePath) {
+    app.once('will-quit', () => trace('will quit'));
+    app.once('quit', () => trace('quit'));
+  }
   app.on('second-instance', showPet);
   app.on('window-all-closed', () => app.quit());
   app.whenReady().then(launch).catch(async error => {
